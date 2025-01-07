@@ -7,32 +7,81 @@ import os
 from datetime import datetime
 import json
 import asyncio
-from ..conversation.graph import create_standup_graph, StandupState
 from langchain_core.messages import HumanMessage, AIMessage
+from conversation.graph import create_standup_graph, StandupState
+import ssl
 
 class StandupBot:
     def __init__(self):
         self.app_token = os.getenv("SLACK_APP_TOKEN")
         self.bot_token = os.getenv("SLACK_BOT_TOKEN")
-        self.client = WebClient(token=self.bot_token)
+        print('connor debugging SLACK_BOT_TOKEN', os.getenv('SLACK_BOT_TOKEN'))
+        print('connor debugging SLACK_APP_TOKEN', os.getenv('SLACK_APP_TOKEN'))
+        if not self.app_token or not self.bot_token:
+            raise ValueError("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set in .env file")
+            
+        # Create SSL context
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # Initialize client with SSL context and base URL
+        self.client = WebClient(
+            token=self.bot_token,
+            ssl=ssl_context,
+            base_url="https://slack.com/api/"
+        )
+
+        try:
+            response = self.client.auth_test()
+            print("Bot is authenticated:", response)
+        except Exception as e:
+            print("Authentication failed:", e)
+            print("Please check your SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env file")
+            print("SLACK_BOT_TOKEN should start with 'xoxb-'")
+            print("SLACK_APP_TOKEN should start with 'xapp-'")
+            raise
+
         self.socket_client = SocketModeClient(
             app_token=self.app_token,
             web_client=self.client
         )
+        
+        # Define the handler as an async function
+        async def socket_mode_request_handler(client, req):
+            await self._process_socket_request(client, req)
+
+        # Define a synchronous wrapper for the handler
+        def sync_socket_handler(client, req):
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._process_socket_request(client, req))
+            else:
+                loop.run_until_complete(self._process_socket_request(client, req))
+
+        # Add the synchronous handler as a listener
+        self.socket_client.socket_mode_request_listeners.append(sync_socket_handler)
+        
         self.conversation_graph = create_standup_graph()
         self.active_conversations: Dict[str, Any] = {}
 
+    async def _process_socket_request(self, client, req):
+        """Wrapper to process socket requests asynchronously."""
+        await self.handle_socket_request(client, req)
+
     async def start(self):
         """Start the Slack bot."""
-        self.socket_client.socket_mode_request_listeners.append(
-            self.handle_socket_request
-        )
-        self.socket_client.connect()
         print("Standup bot is running...")
-        
-        # Keep the bot running
-        while True:
-            await asyncio.sleep(1)
+        # Start the client in a non-blocking way
+        self.socket_client.connect()
+        try:
+            # Keep the bot running
+            while True:
+                await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in bot: {e}")
+            self.socket_client.close()
+            raise
 
     async def handle_socket_request(
         self,
@@ -40,6 +89,13 @@ class StandupBot:
         req: SocketModeRequest
     ):
         """Handle incoming socket mode requests."""
+        # Log the incoming request details
+        print("\n=== Incoming Slack Request ===")
+        print(f"Request Type: {req.type}")
+        print(f"Envelope ID: {req.envelope_id}")
+        print(f"Payload: {json.dumps(req.payload, indent=2)}")
+        print("============================\n")
+
         if req.type == "events_api":
             # Acknowledge the request
             response = SocketModeResponse(envelope_id=req.envelope_id)
@@ -56,6 +112,14 @@ class StandupBot:
 
     async def _handle_message(self, event: Dict[str, Any]):
         """Handle incoming messages."""
+        # Log message event details
+        print("\n=== Message Event Details ===")
+        print(f"Channel ID: {event['channel']}")
+        print(f"User ID: {event['user']}")
+        print(f"Message Text: {event.get('text', '').strip()}")
+        print(f"Timestamp: {event.get('ts', '')}")
+        print("===========================\n")
+
         channel_id = event["channel"]
         user_id = event["user"]
         text = event.get("text", "").strip()
@@ -64,6 +128,18 @@ class StandupBot:
             await self._initiate_standup(channel_id, user_id)
         elif user_id in self.active_conversations:
             await self._continue_conversation(channel_id, user_id, text)
+
+    async def _handle_interactive(self, req: SocketModeRequest):
+        """Handle interactive components."""
+        # Log interactive event details
+        print("\n=== Interactive Event Details ===")
+        print(f"Type: {req.payload.get('type', '')}")
+        print(f"Action ID: {req.payload.get('actions', [{}])[0].get('action_id', '')}")
+        print(f"User: {req.payload.get('user', {}).get('id', '')}")
+        print(f"Channel: {req.payload.get('channel', {}).get('id', '')}")
+        print("==============================\n")
+
+        # Rest of the function remains the same
 
     async def _initiate_standup(self, channel_id: str, user_id: str):
         """Start a new standup conversation."""
@@ -109,7 +185,7 @@ class StandupBot:
         try:
             # Update conversation state with user's message
             conv_state = self.active_conversations[user_id]["state"]
-            conv_state["messages"].append(HumanMessage(content=text))
+            conv_state.messages.append(HumanMessage(content=text))
             
             # Run the conversation graph
             await self._run_graph(user_id)
@@ -133,17 +209,17 @@ class StandupBot:
             self.active_conversations[user_id]["state"] = result
             
             # Send any new messages to the user
-            messages = result["messages"]
+            messages = result.messages
             if messages:
                 last_message = messages[-1]
                 if isinstance(last_message, AIMessage):
-                    self.client.chat_postMessage(
+                    await self.client.chat_postMessage(
                         channel=channel_id,
                         text=last_message.content
                     )
             
             # Check if conversation is complete
-            if result["next_step"] == "end":
+            if result.next_step == "end":
                 self._finalize_conversation(user_id)
                 
         except Exception as e:
@@ -158,12 +234,14 @@ class StandupBot:
             channel_id = self.active_conversations[user_id]["channel"]
             
             # Get the last message which should be the formatted update
-            last_message = final_state["messages"][-1].content
+            last_message = final_state.messages[-1].content
             
             # Post to channel
-            self.client.chat_postMessage(
-                channel=channel_id,
-                text=last_message
+            asyncio.create_task(
+                self.client.chat_postMessage(
+                    channel=channel_id,
+                    text=last_message
+                )
             )
             
             # Clean up
@@ -171,7 +249,14 @@ class StandupBot:
 
     def _send_error_message(self, channel_id: str):
         """Send an error message to the channel."""
-        self.client.chat_postMessage(
-            channel=channel_id,
-            text="Sorry, I encountered an error. Please try again."
+        asyncio.create_task(
+            self.client.chat_postMessage(
+                channel=channel_id,
+                text="Sorry, I encountered an error. Please try again."
+            )
         )
+
+if __name__ == "__main__":
+    bot = StandupBot()
+    asyncio.run(bot.start())
+

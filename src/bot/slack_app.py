@@ -33,6 +33,8 @@ class StandupBot:
         
         # Initialize conversation graph
         self.conversation_graph = create_standup_graph()
+        self.event_counter = 0
+        self.processed_keys = set()  # Track processed (ts, text) pairs for deduplication
         
         # Set up message handler
         self._setup_handler()
@@ -41,17 +43,20 @@ class StandupBot:
     def _setup_handler(self) -> None:
         """Setup the socket mode event handler."""
         def socket_handler(client: SocketModeClient, req: SocketModeRequest) -> None:
-            if req.type == "events_api":
-                # Acknowledge request
+            event = req.payload.get("event", {})
+            event_type = event.get("type")
+            if req.type == "events_api" and event_type == "app_mention":
+                # Increment the event counter
+                self.event_counter += 1
+                logger.info(f"Received Slack event #{self.event_counter}: {req.payload}")
+
+                # Acknowledge the event immediately
                 response = SocketModeResponse(envelope_id=req.envelope_id)
                 client.send_socket_mode_response(response)
-                
-                # Process event
-                event = req.payload.get("event", {})
-                
+
                 # Handle only message events that aren't from bots
-                if event.get("type") == "message" and "bot_id" not in event:
-                    self._handle_message(event)
+
+                self._handle_message(event)
 
         self.socket_client.socket_mode_request_listeners.append(socket_handler)
         logger.info("Socket handler setup complete")
@@ -60,8 +65,15 @@ class StandupBot:
         """Handle incoming messages."""
         channel_id = event["channel"]
         user_id = event["user"]
+        bot_id = event.get("bot_id")
         text = event.get("text", "").strip()
+        logger.info(f"Received message from {user_id}: {text}")
+        # Skip messages from bots
+        if bot_id:
+            logger.info(f"Ignoring message from bot: {event}")
+            return
 
+        # Process standup keyword
         if "standup" in text.lower():
             self._generate_standup(channel_id, user_id, text)
 
@@ -83,7 +95,7 @@ class StandupBot:
                 activities={},
                 next_step="initialize"
             )
-            
+            logger.info(f"Generated initial state: {initial_state}")
             # Run the graph
             result = self.conversation_graph.invoke(initial_state)
             
@@ -113,5 +125,5 @@ class StandupBot:
             sleep(1)
 
 if __name__ == "__main__":
-    bot = SimpleStandupBot()
+    bot = StandupBot()
     bot.start()

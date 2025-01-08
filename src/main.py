@@ -8,13 +8,14 @@ async def main():
     # Load environment variables
     load_dotenv()
     
-    # Create and start the bot
+    # Create the bot
     bot = StandupBot()
     
     try:
         await bot.start()
     except KeyboardInterrupt:
         print("\nShutting down gracefully...")
+        await bot.stop()
     except Exception as e:
         print(f"Error: {e}")
         raise

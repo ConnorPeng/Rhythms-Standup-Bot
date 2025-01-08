@@ -41,7 +41,7 @@ class StandupBot:
         # Initialize conversation state
         self.conversation_graph = create_standup_graph()
         self.active_conversations: Dict[str, Dict[str, Any]] = {}
-        logger.debug("StandupBot initialized successfully.")
+        logger.info("StandupBot initialized successfully.")
 
     def _authenticate_bot(self) -> None:
         """Authenticate the bot with Slack."""
@@ -54,9 +54,9 @@ class StandupBot:
 
     def _setup_socket_handler(self) -> None:
         """Setup the socket mode event handler."""
-        logger.debug("Setting up socket handler.")
+        logger.info("Setting up socket handler.")
         def sync_socket_handler(client: SocketModeClient, req: SocketModeRequest) -> None:
-            logger.debug(f"Socket request received: {req.type}")
+            logger.info(f"Socket request received: {req.type}")
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -67,7 +67,7 @@ class StandupBot:
                 loop.close()
 
         self.socket_client.socket_mode_request_listeners.append(sync_socket_handler)
-        logger.debug("Socket handler setup complete.")
+        logger.info("Socket handler setup complete.")
 
     async def start(self) -> None:
         """Start the Slack bot."""
@@ -75,7 +75,6 @@ class StandupBot:
         self.socket_client.connect()
         try:
             while True:
-                logger.debug("Bot is running...")
                 await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"Error in bot: {str(e)}")
@@ -88,7 +87,6 @@ class StandupBot:
         req: SocketModeRequest
     ) -> None:
         """Process incoming socket mode requests."""
-        logger.debug(f"Processing socket request: {req.payload}")
         await self.handle_socket_request(client, req)
 
     async def handle_socket_request(
@@ -97,15 +95,14 @@ class StandupBot:
         req: SocketModeRequest
     ) -> None:
         """Handle incoming socket mode requests."""
-        logger.debug(f"Handling socket request of type: {req.type}")
+        logger.info(f"Handling socket request of type: {req.type}")
         
         if req.type == "events_api":
             response = SocketModeResponse(envelope_id=req.envelope_id)
             client.send_socket_mode_response(response)
-            logger.debug("Acknowledged events_api request.")
+            logger.info("Acknowledged events_api request.")
 
             event = req.payload.get("event", {})
-            logger.debug(f"Event payload: {event}")
             if event.get("type") == "message" and "bot_id" not in event:
                 await self._handle_message(event)
 
@@ -118,18 +115,18 @@ class StandupBot:
         logger.info(f"Message received from {user_id} in {channel_id}: {text}")
 
         if "standup" in text.lower():
-            logger.debug("Detected 'standup' in message. Initiating standup.")
+            logger.info("Detected 'standup' in message. Initiating standup.")
             await self._initiate_standup(channel_id, user_id)
         elif user_id in self.active_conversations:
-            logger.debug(f"Continuing conversation with user {user_id}.")
+            logger.info(f"Continuing conversation with user {user_id}.")
             await self._continue_conversation(channel_id, user_id, text)
 
     async def _initiate_standup(self, channel_id: str, user_id: str) -> None:
         """Start a new standup conversation."""
-        logger.debug(f"Initiating standup for user {user_id} in channel {channel_id}.")
+        logger.info(f"Initiating standup for user {user_id} in channel {channel_id}.")
         try:
             user_info = self.client.users_info(user=user_id)["user"]
-            logger.debug(f"User info fetched: {user_info}")
+            logger.info(f"User info fetched: {user_info}")
             
             initial_state = StandupState(
                 messages=[HumanMessage(content="Let's start my standup update.")],
@@ -156,13 +153,13 @@ class StandupBot:
 
     async def _run_graph(self, user_id: str) -> None:
         """Run the conversation graph with current state."""
-        logger.debug(f"Running conversation graph for user {user_id}.")
+        logger.info(f"Running conversation graph for user {user_id}.")
         try:
             conv_data = self.active_conversations[user_id]
             channel_id = conv_data["channel"]
             
-            result = await self.conversation_graph.arun(conv_data["state"])
-            logger.debug(f"Graph result: {result}")
+            result = await self.conversation_graph.invoke(conv_data["state"])
+            logger.info(f"Graph result: {result}")
             self.active_conversations[user_id]["state"] = result
             
             if result.messages:
@@ -175,7 +172,7 @@ class StandupBot:
                     )
             
             if result.next_step == "end":
-                logger.debug(f"Conversation with user {user_id} ended.")
+                logger.info(f"Conversation with user {user_id} ended.")
                 await self._finalize_conversation(user_id)
                 
         except Exception as e:
